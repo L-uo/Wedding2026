@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>婚礼行程登记表</title>
+    
+    <!-- 1. 引入 Tailwind CSS (样式库) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 2. 引入 React 和 ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- 3. 引入 Babel (用于解析 JSX 语法) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- 4. 引入 LeanCloud SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/leancloud-storage@4.15.0/dist/av-min.js"></script>
+
+    <!-- 样式微调 -->
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        /* 针对移动端优化点击体验 */
+        button, input, select, textarea { touch-action: manipulation; }
+    </style>
+</head>
+<body class="bg-rose-50">
+    <!-- 挂载节点 -->
+    <div id="root"></div>
+
+    <!-- 你的核心代码 -->
+    <script type="text/babel">
+        // ========== 1. 依赖提取 + 配置（前置） ==========
+        // 注意：在CDN模式下，React 和 AV 已经是全局变量，可以直接使用
+        const React = window.React;
+        const ReactDOM = window.ReactDOM;
+        const AV = window.AV; 
+
+        // LeanCloud配置（已填入你提供的信息）
+        const CUSTOM_CONFIG = {
+          appId: "wedding-2026", 
+          leancloud: {
+            appId: "TEwiUKqG1NI5UjacEKadSrQF-gzGzoHsz",    
+            appKey: "WsUOfPs6EzsIExeUY8pvvOuB",   
+            serverURL: "https://tewiukqg.lc-cn-n1-shared.com" 
+          },
+          adminPwd: "8888"
+        };
+
+        // ========== 2. LeanCloud初始化（无语法错误版） ==========
+        let leancloudClient; 
+        let initError = null;
+
+        try {
+          // 检查LeanCloud SDK是否加载
+          if (!AV || !AV.init) throw new Error("LeanCloud SDK未加载，请检查CDN");
+          
+          // 初始化LeanCloud
+          AV.init({
+            appId: CUSTOM_CONFIG.leancloud.appId,
+            appKey: CUSTOM_CONFIG.leancloud.appKey,
+            serverURL: CUSTOM_CONFIG.leancloud.serverURL
+          });
+          leancloudClient = AV; 
+          console.log("LeanCloud初始化成功");
+        } catch (e) {
+          console.error("LeanCloud初始化失败:", e);
+          initError = `LeanCloud初始化失败：${e.message}`;
+        }
+
+        // ========== 3. 工具函数（Emoji替代图标） ==========
+        const getTransportIcon = (type) => {
+          switch (type) {
+            case "飞机": return <span>✈️</span>;
+            case "自驾": return <span>🚗</span>;
+            case "火车": return <span>🚞</span>;
+            case "大巴": return <span>🚌</span>;
+            default: return <span>🚄</span>; // 高铁
+          }
+        };
+
+        // ========== 4. 错误边界组件（修正提示文案） ==========
+        class ErrorBoundary extends React.Component {
+          state = { hasError: false, error: null };
+          static getDerivedStateFromError(error) {
+            return { hasError: true, error };
+          }
+          componentDidCatch(error, info) {
+            console.error("组件渲染错误:", error, info);
+          }
+          render() {
+            if (this.state.hasError) {
+              return (
+                <div className="min-h-screen flex items-center justify-center p-4">
+                  <div className="card max-w-lg w-full bg-white shadow-lg rounded-lg overflow-hidden">
+                    <div className="card-header p-4 border-b border-gray-100">
+                      <h2 className="text-xl font-bold text-rose-600">页面加载失败</h2>
+                    </div>
+                    <div className="card-body p-6">
+                      <p className="text-slate-600 mb-4">错误原因：{this.state.error.message}</p>
+                      <p className="text-xs text-slate-500">
+                        请打开控制台（F12）查看详细错误信息，或检查LeanCloud配置
+                      </p>
+                      <button 
+                        onClick={() => window.location.reload()}
+                        className="btn bg-rose-500 text-white px-4 py-2 rounded mt-4 hover:bg-rose-600 transition"
+                      >
+                        刷新页面
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+            return this.props.children;
+          }
+        }
+
+        // ========== 5. 核心组件 WeddingForm（全量替换为LeanCloud） ==========
+        const WeddingForm = () => {
+          // 基础状态
+          const [formData, setFormData] = React.useState({
+            name: "",
+            count: 1,
+            arrivalDate: "",
+            arrivalTime: "",
+            transportType: "高铁",
+            location: "",
+            phone: "",
+            note: ""
+          });
+          const [successMsg, setSuccessMsg] = React.useState("");
+          const [errorMsg, setErrorMsg] = React.useState("");
+          const [isAdmin, setIsAdmin] = React.useState(false);
+          const [guests, setGuests] = React.useState([]);
+          const [loading, setLoading] = React.useState(true);
+          const [submitting, setSubmitting] = React.useState(false);
+          const [user, setUser] = React.useState(null);
+          // 使用 useRef 来存储 realtimeQuery，避免因为闭包问题导致 cleanup 失败
+          const realtimeQueryRef = React.useRef(null);
+
+          // 1. LeanCloud匿名登录初始化
+          React.useEffect(() => {
+            if (initError || !leancloudClient) {
+              setLoading(false);
+              return;
+            }
+
+            // LeanCloud匿名登录
+            const initAuth = async () => {
+              try {
+                // 匿名注册/登录（LeanCloud自动处理）
+                const user = await AV.User.signUpAnonymously();
+                setUser({ uid: user.id });
+                console.log("匿名登录成功，用户ID：", user.id);
+              } catch (error) {
+                console.error("LeanCloud认证失败:", error);
+                // 屏蔽错误提示，避免婚礼页面出现红色报错，直接静默降级为游客模式
+                // setErrorMsg(`登录失败：${error.message}，将以游客模式展示`);
+                setUser({ uid: "guest" });
+              } finally {
+                setLoading(false);
+              }
+            };
+            initAuth();
+
+            // 组件卸载时清理
+            return () => {
+              if (realtimeQueryRef.current) realtimeQueryRef.current.cancel(); 
+            };
+          }, []);
+
+          // 2. 管理员模式 - 实时监听宾客数据（LeanCloud版）
+          React.useEffect(() => {
+            if (!isAdmin || !user || !leancloudClient) {
+              setGuests([]);
+              // 如果不是管理员，不需要设置loading为true，除非是在初始加载
+              // 这里我们假设初始加载由上面的 useEffect 控制
+              return;
+            }
+
+            setLoading(true);
+            // 取消之前的实时监听
+            if (realtimeQueryRef.current) realtimeQueryRef.current.cancel();
+
+            try {
+              // 构建查询
+              const WeddingGuest = leancloudClient.Object.extend("WeddingGuest");
+              const query = new leancloudClient.Query(WeddingGuest);
+              query.descending("createdAt"); // 按创建时间降序
+
+              // 首次加载所有数据
+              query.find().then((results) => {
+                const guestsData = results.map(formatGuestData);
+                setGuests(guestsData);
+                setLoading(false);
+                
+                // 开启实时监听 (在 query.find 成功后开启)
+                try {
+                    const realtimeQuery = query.subscribe();
+                    realtimeQueryRef.current = realtimeQuery;
+                    
+                    realtimeQuery.on("create", (newGuest) => {
+                        setGuests(prev => [formatGuestData(newGuest), ...prev]);
+                    });
+                    realtimeQuery.on("delete", (deletedGuest) => {
+                        setGuests(prev => prev.filter(guest => guest.id !== deletedGuest.id));
+                    });
+                    realtimeQuery.on("update", (updatedGuest) => {
+                        setGuests(prev => prev.map(guest => 
+                        guest.id === updatedGuest.id ? formatGuestData(updatedGuest) : guest
+                        ));
+                    });
+                } catch(subError) {
+                    console.warn("实时监听启动失败（可能是开发版限制）：", subError);
+                }
+
+              }).catch((error) => {
+                console.error("LeanCloud获取数据失败:", error);
+                setErrorMsg(`数据加载失败：${error.message}`);
+                setLoading(false);
+              });
+            } catch (error) {
+              console.error("LeanCloud查询构建失败:", error);
+              setErrorMsg(`查询失败：${error.message}`);
+              setLoading(false);
+            }
+
+            // 组件卸载时清理
+            return () => {
+              if (realtimeQueryRef.current) realtimeQueryRef.current.cancel();
+            };
+          }, [isAdmin, user]);
+
+          // 格式化LeanCloud数据为前端可用格式
+          const formatGuestData = (guestObj) => {
+            return {
+              id: guestObj.id,
+              name: guestObj.get("name") || "",
+              count: guestObj.get("count") || 1,
+              arrivalDate: guestObj.get("arrivalDate") || "",
+              arrivalTime: guestObj.get("arrivalTime") || "",
+              transportType: guestObj.get("transportType") || "高铁",
+              location: guestObj.get("location") || "",
+              phone: guestObj.get("phone") || "",
+              note: guestObj.get("note") || "",
+              createdAt: guestObj.get("createdAt") || new Date(),
+              userId: guestObj.get("userId") || ""
+            };
+          };
+
+          // 3. 输入变更处理
+          const handleInputChange = (e) => {
+            const { name, value } = e.target;
+            setFormData((prev) => ({ ...prev, [name]: value }));
+            if (errorMsg) setErrorMsg("");
+          };
+
+          // 4. 管理员登录
+          const handleAdminLogin = () => {
+            if (isAdmin) {
+              setIsAdmin(false);
+              return;
+            }
+            const pwd = prompt("请输入管理员密码：");
+            if (pwd === CUSTOM_CONFIG.adminPwd) {
+              setIsAdmin(true);
+            } else if (pwd) {
+              alert("密码错误！");
+            }
+          };
+
+          // 5. 提交表单（LeanCloud存储）
+          const handleSubmit = async (e) => {
+            e.preventDefault();
+            if (!user || !leancloudClient) {
+              setErrorMsg("数据提交功能未加载，请检查LeanCloud配置");
+              return;
+            }
+
+            setSubmitting(true);
+            setErrorMsg("");
+            setSuccessMsg("");
+
+            try {
+              // 创建LeanCloud数据对象
+              const WeddingGuest = leancloudClient.Object.extend("WeddingGuest");
+              const guest = new WeddingGuest();
+              
+              // 设置表单数据
+              guest.set("name", formData.name);
+              guest.set("count", parseInt(formData.count));
+              guest.set("arrivalDate", formData.arrivalDate);
+              guest.set("arrivalTime", formData.arrivalTime);
+              guest.set("transportType", formData.transportType);
+              guest.set("location", formData.location);
+              guest.set("phone", formData.phone);
+              guest.set("note", formData.note);
+              // createdAt 由 LeanCloud 自动处理
+              guest.set("userId", user.uid);
+              
+              // 保存到LeanCloud
+              await guest.save();
+
+              // 重置表单
+              setSuccessMsg("提交成功！感谢您的参与，期待与您相聚～");
+              setFormData({
+                name: "",
+                count: 1,
+                arrivalDate: "",
+                arrivalTime: "",
+                transportType: "高铁",
+                location: "",
+                phone: "",
+                note: ""
+              });
+
+              // 5秒后清空提示
+              setTimeout(() => setSuccessMsg(""), 5000);
+            } catch (error) {
+              console.error("LeanCloud提交失败:", error);
+              setErrorMsg(`提交失败：${error.message}，请稍后重试`);
+            } finally {
+              setSubmitting(false);
+            }
+          };
+
+          // 6. 删除宾客数据（管理员/LeanCloud版）
+          const handleDelete = async (id) => {
+            if (!user || !leancloudClient || !window.confirm("确定要删除这条记录吗？")) return;
+
+            try {
+              const WeddingGuest = leancloudClient.Object.extend("WeddingGuest");
+              // Create a pointer to the existing object
+              const guest = WeddingGuest.createWithoutData(id);
+              await guest.destroy(); // 删除数据
+              
+              // 如果实时监听生效，下面的 setGuests 其实可以不写，但为了保险起见可以手动过滤一下
+              setGuests(prev => prev.filter(g => g.id !== id));
+
+              setSuccessMsg("删除成功！");
+              setTimeout(() => setSuccessMsg(""), 3000);
+            } catch (error) {
+              console.error("LeanCloud删除失败:", error);
+              setErrorMsg(`删除失败：${error.message}`);
+            }
+          };
+
+          // 7. 排序宾客数据（按日期+时间）
+          const sortedGuests = React.useMemo(() => {
+            if (!Array.isArray(guests)) return [];
+            return [...guests].sort((a, b) => {
+              const dateA = a.arrivalDate || "";
+              const dateB = b.arrivalDate || "";
+              if (dateA !== dateB) return dateA.localeCompare(dateB);
+              return (a.arrivalTime || "").localeCompare(b.arrivalTime || "");
+            });
+          }, [guests]);
+
+          // ========== 渲染逻辑（修正初始化错误提示） ==========
+          if (initError) {
+            return (
+              <div className="min-h-screen flex items-center justify-center p-4">
+                <div className="card max-w-lg w-full bg-white shadow-lg rounded-lg overflow-hidden">
+                  <div className="card-header flex items-center gap-2 p-4 border-b border-gray-100">
+                    <span>⚠️</span>
+                    <h2 className="text-xl font-bold text-rose-600">配置错误</h2>
+                  </div>
+                  <div className="card-body p-6">
+                    <p className="text-slate-600 mb-4">{initError}</p>
+                    <div className="bg-slate-50 p-3 rounded-md text-xs text-slate-500 font-mono mb-4">
+                      请检查 CUSTOM_CONFIG.leancloud 中的配置是否正确（从LeanCloud控制台复制）
+                    </div>
+                    <button 
+                      onClick={() => window.location.reload()}
+                      className="btn bg-rose-500 text-white px-4 py-2 rounded hover:bg-rose-600 transition"
+                    >
+                      刷新页面
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+
+          return (
+            <div className="min-h-screen bg-rose-50 pb-10">
+              {/* 顶部导航 */}
+              <header className="sticky top-0 z-10 bg-white shadow-sm border-b border-rose-100">
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-rose-600 text-white p-2 rounded-lg">
+                      <span>👤</span>
+                    </div>
+                    <h1 className="text-xl sm:text-2xl font-bold text-rose-700">婚礼行程登记表</h1>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <span className="text-sm text-rose-600 hidden md:inline-block">
+                      {isAdmin ? "👑 管理员模式" : "❤️ 欢迎填写"}
+                    </span>
+                    <button
+                      onClick={handleAdminLogin}
+                      className="p-2 rounded-full hover:bg-rose-50 transition-colors text-rose-600"
+                      title={isAdmin ? "退出管理员" : "进入管理员模式"}
+                    >
+                      {isAdmin ? <span>🔓</span> : <span>🔒</span>}
+                    </button>
+                  </div>
+                </div>
+              </header>
+
+              {/* 主内容区 */}
+              <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                  {/* 表单卡片 */}
+                  <div className="lg-col-span-1">
+                    <div className="bg-white shadow-lg rounded-lg overflow-hidden">
+                      <div className="px-6 py-4 border-b border-rose-100 bg-rose-50/50">
+                        <h2 className="text-lg font-semibold text-rose-700 flex items-center gap-2">
+                          <span>✅</span>
+                          填写行程信息
+                        </h2>
+                      </div>
+                      <div className="p-6">
+                        <form onSubmit={handleSubmit} className="space-y-6">
+                          {/* 错误提示 */}
+                          {errorMsg && (
+                            <div className="p-3 bg-red-50 text-red-600 rounded-md flex items-center gap-2 text-sm">
+                              ❌ {errorMsg}
+                            </div>
+                          )}
+
+                          {/* 成功提示 */}
+                          {successMsg && (
+                            <div className="p-3 bg-green-50 text-green-600 rounded-md flex items-center gap-2 text-sm">
+                              ✅ {successMsg}
+                            </div>
+                          )}
+
+                          {/* 姓名 + 人数 */}
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                              <label className="block text-sm font-medium text-slate-700">姓名 *</label>
+                              <input
+                                required
+                                type="text"
+                                name="name"
+                                value={formData.name}
+                                onChange={handleInputChange}
+                                placeholder="请输入姓名"
+                                className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-rose-500 transition-shadow"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <label className="block text-sm font-medium text-slate-700">同行人数 *</label>
+                              <input
+                                required
+                                type="number"
+                                min="1"
+                                name="count"
+                                value={formData.count}
+                                onChange={handleInputChange}
+                                className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-rose-500 transition-shadow"
+                                placeholder="1"
+                              />
+                            </div>
+                          </div>
+
+                          {/* 日期 + 时间 */}
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                              <label className="block text-sm font-medium text-slate-700">到达日期 *</label>
+                              <input
+                                required
+                                type="date"
+                                name="arrivalDate"
+                                value={formData.arrivalDate}
+                                onChange={handleInputChange}
+                                className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-rose-500 transition-shadow"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <label className="block text-sm font-medium text-slate-700">到达时间 *</label>
+                              <input
+                                required
+                                type="time"
+                                name="arrivalTime"
+                                value={formData.arrivalTime}
+                                onChange={handleInputChange}
+                                className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-rose-500 transition-shadow"
+                              />
+                            </div>
+                          </div>
+
+                          {/* 交通方式 */}
+                          <div className="space-y-2">
+                            <label className="block text-sm font-medium text-slate-700">交通方式 *</label>
+                            <div className="grid grid-cols-3 gap-2">
+                              {["高铁", "飞机", "自驾", "火车", "大巴"].map((type) => (
+                                <button
+                                  key={type}
+                                  type="button"
+                                  onClick={() => setFormData((prev) => ({ ...prev, transportType: type }))}
+                                  className={`px-3 py-2 border rounded-md text-sm transition-colors ${formData.transportType === type ? "bg-rose-50 border-rose-400 text-rose-700" : "border-slate-200 hover:bg-slate-50 text-slate-600"}`}
+                                >
+                                  {type}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* 到达地点 */}
+                          <div className="space-y-2">
+                            <label className="block text-sm font-medium text-slate-700">到达站点/地点 *</label>
+                            <div className="relative">
+                              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
+                                <span>📍</span>
+                              </span>
+                              <input
+                                required
+                                type="text"
+                                name="location"
+                                value={formData.location}
+                                onChange={handleInputChange}
+                                placeholder="例如：北京南站 / 首都机场T3"
+                                className="w-full pl-10 pr-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-rose-500 transition-shadow"
+                              />
+                            </div>
+                          </div>
+
+                          {/* 联系电话 */}
+                          <div className="space-y-2">
+                            <label className="block text-sm font-medium text-slate-700">联系电话</label>
+                            <input
+                              type="tel"
+                              name="phone"
+                              value={formData.phone}
+                              onChange={handleInputChange}
+                              placeholder="方便接车司机联系（选填）"
+                              className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-rose-500 transition-shadow"
+                            />
+                          </div>
+
+                          {/* 备注 */}
+                          <div className="space-y-2">
+                            <label className="block text-sm font-medium text-slate-700">备注</label>
+                            <textarea
+                              name="note"
+                              value={formData.note}
+                              onChange={handleInputChange}
+                              rows="2"
+                              placeholder="有老人/小孩？行李较多？（选填）"
+                              className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-rose-500 transition-shadow resize-none"
+                            />
+                          </div>
+
+                          {/* 提交按钮 */}
+                          <button
+                            type="submit"
+                            disabled={submitting || !user}
+                            className="w-full bg-rose-600 text-white font-semibold py-3 px-4 rounded-lg shadow-md hover:bg-rose-700 focus:outline-none focus:ring-2 focus:ring-rose-500 focus:ring-offset-2 disabled:opacity-70 disabled:cursor-not-allowed transition-all"
+                          >
+                            {submitting ? (
+                              <span className="flex items-center justify-center">
+                                <span className="animate-spin mr-2">⏳</span>
+                                提交中...
+                              </span>
+                            ) : (
+                              "提交行程"
+                            )}
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 管理员数据表格 */}
+                  {isAdmin && (
+                    <div className="lg-col-span-2">
+                      <div className="bg-white shadow-lg rounded-lg overflow-hidden h-full flex flex-col">
+                        <div className="px-6 py-4 border-b border-rose-100 bg-rose-50/50 flex justify-between items-center">
+                          <h2 className="text-lg font-semibold text-rose-700 flex items-center gap-2">
+                            <span>👥</span>
+                            宾客行程总表
+                          </h2>
+                          <span className="text-sm text-slate-600 bg-white px-3 py-1 rounded-full border border-rose-100">
+                             共 {guests.length} 记录 / {guests.reduce((acc, curr) => acc + parseInt(curr.count || 0), 0)} 人
+                          </span>
+                        </div>
+                        <div className="flex-1 overflow-hidden relative min-h-[400px]">
+                          {loading ? (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-500 bg-white/80 z-10">
+                              <span className="animate-spin text-3xl mb-3">⏳</span>
+                              <p>加载数据中...</p>
+                            </div>
+                          ) : guests.length === 0 ? (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-500">
+                              <span className="text-4xl mb-3 opacity-50">👥</span>
+                              <p>暂无行程记录，快邀请宾客填写吧～</p>
+                            </div>
+                          ) : (
+                            <div className="overflow-auto h-full w-full">
+                              <table className="min-w-full text-sm text-left">
+                                <thead className="bg-rose-50 text-slate-700 sticky top-0 z-10 shadow-sm">
+                                  <tr>
+                                    <th className="px-4 py-3 font-semibold whitespace-nowrap">到达时间</th>
+                                    <th className="px-4 py-3 font-semibold whitespace-nowrap">姓名</th>
+                                    <th className="px-4 py-3 font-semibold whitespace-nowrap">人数</th>
+                                    <th className="px-4 py-3 font-semibold whitespace-nowrap">交通</th>
+                                    <th className="px-4 py-3 font-semibold whitespace-nowrap">到达地点</th>
+                                    <th className="px-4 py-3 font-semibold whitespace-nowrap hidden sm:table-cell">电话</th>
+                                    <th className="px-4 py-3 font-semibold whitespace-nowrap hidden md:table-cell">备注</th>
+                                    <th className="px-4 py-3 font-semibold whitespace-nowrap">操作</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-rose-100">
+                                  {sortedGuests.map((guest) => (
+                                    <tr key={guest.id} className="hover:bg-rose-50/50 transition-colors">
+                                      <td className="px-4 py-3">
+                                        <div className="font-medium text-rose-700 whitespace-nowrap">{guest.arrivalDate}</div>
+                                        <div className="text-xs text-slate-500 flex items-center gap-1">
+                                          <span>🕒</span>
+                                          {guest.arrivalTime}
+                                        </div>
+                                      </td>
+                                      <td className="px-4 py-3 font-medium text-slate-800">{guest.name}</td>
+                                      <td className="px-4 py-3 text-slate-600">{guest.count}</td>
+                                      <td className="px-4 py-3">
+                                        <span className="inline-flex items-center gap-1 px-2 py-1 bg-rose-50 text-rose-700 rounded border border-rose-100 whitespace-nowrap">
+                                          {getTransportIcon(guest.transportType)}
+                                          {guest.transportType}
+                                        </span>
+                                      </td>
+                                      <td className="px-4 py-3 text-slate-600">{guest.location}</td>
+                                      <td className="px-4 py-3 text-slate-600 hidden sm:table-cell">{guest.phone || "-"}</td>
+                                      <td className="px-4 py-3 text-slate-600 hidden md:table-cell max-w-[150px] truncate" title={guest.note}>
+                                        {guest.note || "-"}
+                                      </td>
+                                      <td className="px-4 py-3">
+                                        <button
+                                          onClick={() => handleDelete(guest.id)}
+                                          className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                                          title="删除"
+                                        >
+                                          <span>🗑️</span>
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </main>
+
+              {/* 页脚 */}
+              <footer className="bg-white border-t border-rose-100 py-6 mt-auto">
+                <div className="max-w-7xl mx-auto px-4 text-center text-sm text-slate-400">
+                  © 2026 婚礼行程登记 | 祝您旅途愉快，阖家幸福 ❤️
+                </div>
+              </footer>
+            </div>
+          );
+        };
+
+        // ========== 6. 挂载组件 ==========
+        const rootElement = document.getElementById("root");
+        const root = ReactDOM.createRoot(rootElement);
+        root.render(
+            <ErrorBoundary>
+                <WeddingForm />
+            </ErrorBoundary>
+        );
+    </script>
+</body>
+</html>
